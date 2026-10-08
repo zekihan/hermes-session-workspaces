@@ -1,5 +1,5 @@
 name: session-workspaces
-version: 0.1.0
+version: 0.2.0
 description: Persistent root-chat worktree names across repositories and delegated agents, with local path guards.
 author: zekihan
 kind: standalone

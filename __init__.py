@@ -13,9 +13,13 @@ SCHEMA = {
     'name': 'workspace_repo',
     'description': 'Create or reuse this chat\'s isolated repository worktree from fetched origin/main. '
                    'Call before accessing a repository. Children inherit the root chat workspace. '
-                   'Use the returned absolute path for file tools and terminal workdir. Does not commit or push.',
+                   'Use create=true only for a new nonexistent repo path: initializes an isolated unborn repo, '
+                   'without origin/main. Use the returned absolute path for file tools and terminal workdir. '
+                   'Does not commit or push.',
     'parameters': {'type': 'object', 'properties': {
-        'repo': {'type': 'string', 'description': 'Absolute path to the original repository under configured roots'}},
+        'repo': {'type': 'string', 'description': 'Absolute existing or intended repository path under configured roots'},
+        'create': {'type': 'boolean', 'default': False,
+                   'description': 'Explicitly bootstrap a new isolated repo; requested path must not exist'}},
         'required': ['repo'], 'additionalProperties': False},
 }
 
@@ -52,14 +56,17 @@ class Plugin:
             self.errors.pop(identity, None)
             entries = self.manager.entries(identity)
             return {'context': 'Session workspace: ' + self.manager.workspace_id(identity) + '. '
-                    'Before accessing any repository under the configured roots, call workspace_repo '
+                    'Before accessing an existing repository under the configured roots, call workspace_repo '
                     'with its original absolute repository path. Use ONLY the returned worktree path, '
                     'including terminal workdir. Never edit/switch/reset the original checkout or main/master. '
                     'Subagents inherit this workspace; coordinate parallel edits to shared files. '
                     'Do not use Hermes\' separate worktree isolation for these same repositories. '
                     'Worktrees start from fetched origin/' + self.manager.base_branch + '; missing refs/fetch failures '
                     'must stop the task. Existing worktrees are reused without pulling or resetting. '
-                    'No automatic commit, push, merge, or cleanup. Mappings: ' + json.dumps(entries)}
+                    'For a new repository, call workspace_repo with create=true and a nonexistent intended path; '
+                    'work only in its returned isolated directory. Repository-parent/non-repo paths permit cloning; '
+                    'once cloned, use workspace_repo normally. No automatic commit, push, merge, or cleanup. '
+                    'Mappings: ' + json.dumps(entries)}
         except Exception as exc:
             self.errors[identity] = str(exc) if isinstance(exc, WorkspaceError) else 'Workspace initialization failed'
             return {'context': 'WORKSPACE ERROR: ' + self.errors[identity] + '. Do not access repositories.'}
@@ -70,7 +77,7 @@ class Plugin:
             if identity in self.errors:
                 raise WorkspaceError(self.errors[identity])
             runtime(task_id or session_id, kwargs)
-            entry = self.manager.ensure(identity, args['repo'])
+            entry = self.manager.ensure(identity, args['repo'], create=args.get('create', False))
             return json.dumps({'success': True, 'workspace': entry})
         except Exception as exc:
             message = str(exc) if isinstance(exc, WorkspaceError) else 'Workspace operation failed'

@@ -1,6 +1,6 @@
 [project]
 name = "hermes-session-workspaces"
-version = "0.1.0"
+version = "0.2.0"
 description = "Session-scoped multi-repository Git worktrees for Hermes Agent"
 requires-python = ">=3.10"
 license = "MIT"
