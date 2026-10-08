@@ -36,6 +36,11 @@ class Manager:
                     branch TEXT NOT NULL, base_commit TEXT NOT NULL,
                     PRIMARY KEY(root, repo));
             ''')
+            # Serialize migrations too: multiple sessions may load an older DB.
+            conn.execute('BEGIN IMMEDIATE')
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(workspaces)')}
+            if 'bootstrap' not in columns:
+                conn.execute('ALTER TABLE workspaces ADD COLUMN bootstrap INTEGER NOT NULL DEFAULT 0')
 
     def connect(self):
         return sqlite3.connect(self.db, timeout=60, factory=ClosingConnection)
@@ -114,16 +119,18 @@ class Manager:
     def entries(self, identity):
         root = self.root_session(identity)
         with self.connect() as conn:
-            rows = conn.execute('SELECT repo, path, branch, base_commit FROM workspaces WHERE root=? ORDER BY repo',
+            rows = conn.execute('SELECT repo, path, branch, base_commit, bootstrap FROM workspaces WHERE root=? ORDER BY repo',
                                 (root,)).fetchall()
         return [dict(repo=repo, path=path, branch=branch, base_commit=base,
-                     workspace_id=self.workspace_id(identity)) for repo, path, branch, base in rows]
+                     bootstrap=bool(bootstrap), workspace_id=self.workspace_id(identity))
+                for repo, path, branch, base, bootstrap in rows]
 
-    def validate_worktree(self, repo, path, branch):
+    def validate_worktree(self, repo, path, branch, bootstrap=False):
         if not Path(path).exists() or self.git(path, 'branch', '--show-current') != branch:
             raise WorkspaceError('Recorded worktree is missing or on another branch; refusing reset')
         common = self.git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
-        original = self.git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+        original = (str(Path(path) / '.git') if bootstrap else
+                    self.git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
         if Path(common).resolve() != Path(original).resolve():
             raise WorkspaceError('Recorded worktree belongs to a different repository; refusing reuse')
 
@@ -134,45 +141,82 @@ class Manager:
                 if '.git' in path.relative_to(Path(entry['path'])).parts:
                     return 'Direct access to Git metadata is not allowed'
                 try:
-                    self.validate_worktree(entry['repo'], entry['path'], entry['branch'])
+                    self.validate_worktree(entry['repo'], entry['path'], entry['branch'], entry['bootstrap'])
                 except WorkspaceError as exc:
                     return str(exc)
                 return None
         if path.is_relative_to(self.workspace_root):
             return 'This path belongs to another workspace or is not registered'
-        if any(path.is_relative_to(root) for root in self.roots):
-            return 'Use workspace_repo for this repository, then use its returned worktree path'
+        for root in self.roots:
+            if path.is_relative_to(root):
+                # Only inspect ancestors within the configured root. Missing paths
+                # and repository-parent directories must permit clone/init setup.
+                for ancestor in (path, *path.parents):
+                    marker = ancestor / '.git'
+                    bare = ((ancestor / 'HEAD').is_file()
+                            and (ancestor / 'objects').is_dir()
+                            and (ancestor / 'refs').is_dir())
+                    if marker.exists() or marker.is_symlink() or bare:
+                        return 'Use workspace_repo for this repository, then use its returned worktree path'
+                    if ancestor == root:
+                        break
         return None
 
-    def ensure(self, identity, repo_path):
-        repo = self.canonical_repo(repo_path)
+    def ensure(self, identity, repo_path, create=False):
+        if not isinstance(create, bool):
+            raise WorkspaceError('create must be a boolean')
+        requested = Path(repo_path).expanduser()
+        if not requested.is_absolute():
+            raise WorkspaceError('Repository path must be absolute')
+        requested = requested.resolve()
+        if not any(requested != r and requested.is_relative_to(r) for r in self.roots):
+            raise WorkspaceError('Repository is outside configured roots or is the root itself')
         root = self.root_session(identity)
         wid = self.workspace_id(identity)
         # SQLite write transaction serializes creation across threads/processes.
         conn = self.connect()
         try:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute('SELECT path, branch, base_commit FROM workspaces WHERE root=? AND repo=?',
-                               (root, str(repo))).fetchone()
+            row = conn.execute('SELECT path, branch, base_commit, bootstrap FROM workspaces WHERE root=? AND repo=?',
+                               (root, str(requested))).fetchone()
+            repo = requested
+            if not row and not create:
+                repo = self.canonical_repo(repo_path)
+                row = conn.execute('SELECT path, branch, base_commit, bootstrap FROM workspaces WHERE root=? AND repo=?',
+                                   (root, str(repo))).fetchone()
             if row:
-                path, branch, base = row
-                self.validate_worktree(repo, path, branch)
+                path, branch, base, bootstrap = row
+                if create and not bootstrap:
+                    raise WorkspaceError('create cannot bootstrap an existing repository')
+                self.validate_worktree(repo, path, branch, bootstrap)
             else:
                 branch = 'agent/' + wid
                 suffix = hashlib.sha256(str(repo).encode()).hexdigest()[:10]
                 path = str(self.workspace_root / wid / (repo.name + '-' + suffix))
-                ref = 'refs/remotes/origin/' + self.base_branch
-                self.git(repo, 'check-ref-format', 'refs/heads/' + self.base_branch)
-                self.git(repo, 'fetch', '--no-recurse-submodules', 'origin',
-                         '+refs/heads/' + self.base_branch + ':' + ref)
-                base = self.git(repo, 'rev-parse', '--verify', ref + '^{commit}')
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
-                self.git(repo, '-c', 'branch.autoSetupMerge=false', 'worktree', 'add',
-                         '--no-track', '-b', branch, path, base)
-                conn.execute('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?)',
-                             (root, str(repo), path, branch, base))
+                bootstrap = create
+                if create:
+                    if requested.exists() or requested.is_symlink():
+                        raise WorkspaceError('create requires a new, nonexistent repository path')
+                    reason = self.guard_path(identity, requested)
+                    if reason:
+                        raise WorkspaceError(reason)
+                    # mkdir without exist_ok preserves interrupted/unregistered work.
+                    Path(path).mkdir(parents=True)
+                    self.git(path, 'init', '--initial-branch=' + branch)
+                    base = ''  # Unborn branch: never fabricate an initial commit.
+                else:
+                    ref = 'refs/remotes/origin/' + self.base_branch
+                    self.git(repo, 'check-ref-format', 'refs/heads/' + self.base_branch)
+                    self.git(repo, 'fetch', '--no-recurse-submodules', 'origin',
+                             '+refs/heads/' + self.base_branch + ':' + ref)
+                    base = self.git(repo, 'rev-parse', '--verify', ref + '^{commit}')
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
+                    self.git(repo, '-c', 'branch.autoSetupMerge=false', 'worktree', 'add',
+                             '--no-track', '-b', branch, path, base)
+                conn.execute('INSERT INTO workspaces (root, repo, path, branch, base_commit, bootstrap) VALUES (?, ?, ?, ?, ?, ?)',
+                             (root, str(repo), path, branch, base, bootstrap))
             conn.commit()
             return dict(repo=str(repo), path=path, branch=branch, base_commit=base,
-                        workspace_id=wid)
+                        bootstrap=bool(bootstrap), workspace_id=wid)
         finally:
             conn.close()

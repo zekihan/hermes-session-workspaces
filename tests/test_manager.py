@@ -169,6 +169,72 @@ class ManagerTests(unittest.TestCase):
             m.ensure('task', str(self.repo))
         self.assertIsNotNone(m.guard_path('task', Path(entry['path']) / 'file.txt'))
 
+    def test_legacy_database_migrates_concurrently_without_losing_dirty_worktree(self):
+        from concurrent.futures import ThreadPoolExecutor
+        m = self.manager()
+        m.bind('root', 'task')
+        entry = m.ensure('task', str(self.repo))
+        (Path(entry['path']) / 'file.txt').write_text('session work')
+        with m.connect() as conn:
+            conn.execute('ALTER TABLE workspaces DROP COLUMN bootstrap')
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(
+                lambda _: self.manager().ensure('task', str(self.repo)), range(8)))
+        self.assertTrue(all(result == entry for result in results))
+        self.assertEqual((Path(entry['path']) / 'file.txt').read_text(), 'session work')
+
+    def test_bootstrap_rejects_existing_paths_and_nested_checkouts(self):
+        m = self.manager()
+        m.bind('root', 'task')
+        empty = self.repos / 'empty'
+        empty.mkdir()
+        for path in (self.repo, self.repo / 'new-project', self.repos, empty,
+                     self.root / 'outside'):
+            with self.subTest(path=path), self.assertRaises(RuntimeError):
+                m.ensure('task', str(path), create=True)
+        self.assertEqual(m.entries('task'), [])
+        self.assertEqual(git(self.repo, 'branch', '--show-current'), 'main')
+
+    def test_bootstrap_cross_session_metadata_and_changed_branch_are_blocked(self):
+        m = self.manager()
+        m.bind('root', 'task')
+        m.bind('other', 'other-task')
+        target = self.repos / 'fresh'
+        entry = m.ensure('task', str(target), create=True)
+        path = Path(entry['path'])
+        self.assertIsNotNone(m.guard_path('other-task', path / 'first.txt'))
+        self.assertIsNotNone(m.guard_path('task', path / '.git' / 'config'))
+        git(path, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+        self.assertIsNotNone(m.guard_path('task', path / 'first.txt'))
+        with self.assertRaises(RuntimeError):
+            m.ensure('task', str(target))
+
+    def test_bootstrap_concurrent_creation_reuses_one_directory(self):
+        from concurrent.futures import ThreadPoolExecutor
+        m = self.manager()
+        m.bind('root', 'task')
+        target = self.repos / 'fresh'
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(
+                lambda _: self.manager().ensure('task', str(target), create=True), range(4)))
+        self.assertTrue(all(entry == results[0] for entry in results))
+        self.assertEqual(len(m.entries('task')), 1)
+        self.assertFalse(target.exists())
+
+    def test_guard_protects_bare_repos_and_git_file_markers(self):
+        m = self.manager()
+        m.bind('root', 'task')
+        bare = self.repos / 'bare.git'
+        bare.mkdir()
+        git(bare, 'init', '--bare')
+        self.assertIsNotNone(m.guard_path('task', bare / 'config'))
+        linked = self.repos / 'linked'
+        linked.mkdir()
+        (linked / '.git').write_text('gitdir: /missing/metadata')
+        self.assertIsNotNone(m.guard_path('task', linked / 'file.txt'))
+        self.assertIsNotNone(m.guard_path('task', self.repo / 'missing' / 'new.txt'))
+        self.assertIsNone(m.guard_path('task', self.repos / 'not-a-repo' / 'new.txt'))
+
     def test_concurrent_creation_reuses_exactly_one_worktree(self):
         from concurrent.futures import ThreadPoolExecutor
         m = self.manager()

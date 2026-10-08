@@ -19,6 +19,8 @@ The repository hash avoids collisions between repositories with identical basena
 - Child and nested-child sessions inherit the root chat's identity through Hermes's `parent_session_id` hook payload.
 - Mappings persist in profile-scoped SQLite storage. Resuming the **same Hermes session ID** reuses its dirty worktrees without fetching, pulling, recreating or resetting them.
 - Tool hooks block configured original-checkout paths, other sessions' workspace paths, direct `.git` file access and access to session worktrees switched away from their registered branch.
+- Non-repository paths and repository-parent directories under `roots` are allowed, so cloning into a new destination is possible. Once a clone exists, its original checkout is guarded; call `workspace_repo` before editing it.
+- `workspace_repo` with `create: true` explicitly bootstraps a brand-new repository in the session directory, on an unborn `agent/s-…` branch. It does not create or edit the intended original path, require an origin, make a commit, or publish anything. Existing repositories cannot use this mode to bypass fetch failures or missing `origin/main`.
 - Missing `origin/main`, failed fetches, missing worktrees and unknown parents produce errors rather than selecting the main checkout.
 - No automatic commits, pushes, merges, cleanup or branch deletion. Worktrees and changes survive session end.
 
@@ -45,7 +47,7 @@ Settings live under `plugins.entries.session-workspaces.settings` and are read a
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `roots` | `[]` | List of absolute repository-parent directories. Explicit opt-in; no repository can be created without it. All paths beneath these roots are guarded, including discovery commands. |
+| `roots` | `[]` | List of absolute repository-parent directories. Explicit opt-in for managed worktrees and bootstrap repositories. Existing Git repositories beneath these roots are guarded; non-repository parent/destination paths are allowed. Recursive discovery and shell checks remain best-effort, not a sandbox. |
 | `workspace_root` | `$HERMES_HOME/workspaces` | Location for session worktrees; should be outside `roots`. |
 | `state_dir` | `$HERMES_HOME/session-workspaces` | Persistent mapping database; should be outside `roots`. |
 | `base_branch` | `main` | Branch fetched from `origin`. A repo without it fails; no automatic `master` fallback. This is a profile-wide setting. |
@@ -73,6 +75,20 @@ The agent uses `workspace.path` for all subsequent file paths and terminal `work
 Direct original-checkout access is **blocked with instructions to call the helper**, not silently rewritten. The plugin intentionally does not rewrite arbitrary shell commands or globally change process cwd.
 
 Parent and children **share the same worktree for the same repository**. Coordinate file ownership or serialize editing tasks; this plugin does not provide per-file editing locks.
+
+### Creating a brand-new repository
+
+Use an absolute **nonexistent intended repository path** beneath a configured root:
+
+```json
+{"repo": "/home/hermes/repos/github.com/zekihan/new-project", "create": true}
+```
+
+The returned `workspace.path` is a standalone Git repository inside the session workspace, not a linked worktree. `workspace.bootstrap` is `true`, and `base_commit` is empty because there was no commit at creation (it stays the creation base, not current HEAD). Work only in this returned directory. Calls using the same intended path, with or without `create`, resume it without resetting; children inherit it. Missing or switched directories still fail closed.
+
+Do not run `git init` directly at the intended original path: once initialized, it is an existing guarded repository and the normal tool will require fetched `origin/main`. Clone existing remote projects normally into a new destination, then call the normal helper.
+
+Commit and publish explicitly when authorized. Keep the registered session branch; for initial publication you can push `HEAD:main` instead of switching the workspace to `main`. Creating a remote repository or a permanent local clone is separate from bootstrapping. The tool never automatically creates those or changes to a permanent checkout after publishing.
 
 ## Safety boundaries — please read
 
