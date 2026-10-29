@@ -235,6 +235,51 @@ class ManagerTests(unittest.TestCase):
         self.assertIsNotNone(m.guard_path('task', self.repo / 'missing' / 'new.txt'))
         self.assertIsNone(m.guard_path('task', self.repos / 'not-a-repo' / 'new.txt'))
 
+    def assert_redirected_workspace_is_rejected(self, create):
+        m = self.manager()
+        m.bind('root', 'task')
+        m.bind('other', 'other-task')
+        other_directory = m.workspace_root / m.workspace_id('other-task')
+        other_directory.mkdir(parents=True)
+        sentinel = other_directory / 'preserved.txt'
+        sentinel.write_text('other session work')
+        session_directory = m.workspace_root / m.workspace_id('task')
+        session_directory.symlink_to(other_directory, target_is_directory=True)
+        requested = self.repos / 'fresh' if create else self.repo
+
+        with self.assertRaisesRegex(RuntimeError, 'Workspace.*redirect'):
+            m.ensure('task', str(requested), create=create)
+
+        self.assertEqual(m.entries('task'), [])
+        self.assertEqual(list(other_directory.iterdir()), [sentinel])
+        self.assertEqual(sentinel.read_text(), 'other session work')
+        self.assertEqual(git(self.repo, 'branch', '--list', 'agent/*'), '')
+        self.assertEqual(git(self.repo, 'worktree', 'list', '--porcelain').count('worktree '), 1)
+        self.assertEqual(git(self.repo, 'branch', '--show-current'), 'main')
+
+    def test_linked_worktree_creation_rejects_redirected_session_directory(self):
+        self.assert_redirected_workspace_is_rejected(create=False)
+
+    def test_bootstrap_creation_rejects_redirected_session_directory(self):
+        self.assert_redirected_workspace_is_rejected(create=True)
+
+    def test_resume_rejects_redirected_session_directory(self):
+        m = self.manager()
+        m.bind('root', 'task')
+        target = self.repos / 'fresh'
+        entry = m.ensure('task', str(target), create=True)
+        path = Path(entry['path'])
+        (path / 'dirty.txt').write_text('preserved session work')
+        moved = m.workspace_root / 'moved-session'
+        path.parent.rename(moved)
+        path.parent.symlink_to(moved, target_is_directory=True)
+
+        with self.assertRaisesRegex(RuntimeError, 'Workspace.*redirect'):
+            self.manager().ensure('task', str(target))
+
+        self.assertEqual(m.entries('task'), [entry])
+        self.assertEqual((moved / path.name / 'dirty.txt').read_text(), 'preserved session work')
+
     def test_concurrent_creation_reuses_exactly_one_worktree(self):
         from concurrent.futures import ThreadPoolExecutor
         m = self.manager()

@@ -25,6 +25,7 @@ The repository hash avoids collisions between repositories with identical basena
 - Non-repository paths and repository-parent directories under `roots` are allowed, so cloning into a new destination is possible. Once a clone exists, its original checkout is guarded; call `workspace_repo` before editing it.
 - `workspace_repo` with `create: true` explicitly bootstraps a brand-new repository in the session directory, on an unborn `agent/s-…` branch. It does not create or edit the intended original path, require an origin, make a commit, or publish anything. Existing repositories cannot use this mode to bypass fetch failures or missing `origin/main`.
 - Missing `origin/main`, failed fetches, missing worktrees and unknown parents produce errors rather than selecting the main checkout.
+- Session/repository directories below the resolved `workspace_root` must not be redirected by symlinks. Creation and reuse reject redirected paths without deleting or rewriting existing work.
 - No automatic commits, pushes, merges, cleanup or branch deletion. Worktrees and changes survive session end.
 
 ## Install and configure
