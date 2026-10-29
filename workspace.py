@@ -153,7 +153,16 @@ class Manager:
                      bootstrap=bool(bootstrap), workspace_id=self.workspace_id(identity))
                 for repo, path, branch, base, bootstrap in rows]
 
+    def validate_workspace_path(self, path):
+        # workspace_root is resolved at initialization. Its session/repository
+        # descendants must keep their lexical locations too: following a symlink
+        # here can create/reuse work in another session's directory, while the
+        # registry and path guard still refer to the unredirected location.
+        if Path(path).resolve() != Path(path):
+            raise WorkspaceError('Workspace path is redirected; refusing creation or reuse')
+
     def validate_worktree(self, repo, path, branch, bootstrap=False):
+        self.validate_workspace_path(path)
         if not Path(path).exists() or self.git(path, 'branch', '--show-current') != branch:
             raise WorkspaceError('Recorded worktree is missing or on another branch; refusing reset')
         common = self.git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
@@ -221,6 +230,7 @@ class Manager:
                 branch = 'agent/' + wid
                 suffix = hashlib.sha256(str(repo).encode()).hexdigest()[:10]
                 path = str(self.workspace_root / wid / (repo.name + '-' + suffix))
+                self.validate_workspace_path(path)
                 bootstrap = create
                 if create:
                     if requested.exists() or requested.is_symlink():
