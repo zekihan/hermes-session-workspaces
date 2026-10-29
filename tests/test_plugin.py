@@ -110,6 +110,43 @@ class PluginTests(fixtures.ManagerTests):
             self.assertEqual(hook(tool_name='terminal', args=args, task_id='task',
                                   session_id='root', cwd=str(self.root))['action'], 'block')
 
+    def test_terminal_quoted_original_paths_with_spaces_are_blocked(self):
+        spaced = self.repos / 'project with spaces'
+        self.repo.rename(spaced)
+        ctx = self.plugin()
+        for literal in [f'"{spaced}/file.txt"', f"'{spaced}/file.txt'",
+                        str(spaced / 'file.txt').replace(' ', r'\ '),
+                        f'"{spaced}"/file.txt']:
+            with self.subTest(literal=literal):
+                result = ctx.hooks['pre_tool_call'](tool_name='terminal',
+                    args={'command': 'cat ' + literal, 'workdir': str(self.root)},
+                    task_id='task', session_id='root', cwd=str(self.root))
+                self.assertIsNotNone(result)
+                self.assertEqual(result['action'], 'block')
+
+    def test_terminal_quoted_workspace_paths_with_spaces_are_allowed(self):
+        spaced = self.repos / 'project with spaces'
+        self.repo.rename(spaced)
+        ctx = self.plugin()
+        entry = json.loads(ctx.tools['workspace_repo']['handler']({'repo': str(spaced)}, task_id='task'))
+        self.assertTrue(entry['success'], entry)
+        path = entry['workspace']['path'] + '/file.txt'
+        for literal in [f'"{path}"', f"'{path}'", path.replace(' ', r'\ ')]:
+            with self.subTest(literal=literal):
+                result = ctx.hooks['pre_tool_call'](tool_name='terminal',
+                    args={'command': 'cat ' + literal + '; true', 'workdir': str(self.root)},
+                    task_id='task', session_id='root', cwd=str(self.root))
+                self.assertIsNone(result, result)
+
+    def test_terminal_malformed_commands_fail_closed(self):
+        ctx = self.plugin()
+        for command in [None, 42, [], {}, 'cat "unterminated']:
+            with self.subTest(command=command):
+                result = ctx.hooks['pre_tool_call'](tool_name='terminal',
+                    args={'command': command, 'workdir': str(self.root)},
+                    task_id='task', session_id='root', cwd=str(self.root))
+                self.assertEqual(result['action'], 'block')
+
     def test_relative_file_paths_use_actual_cwd(self):
         ctx = self.plugin()
         result = ctx.hooks['pre_tool_call'](tool_name='patch', args={'path': 'file.txt'},
