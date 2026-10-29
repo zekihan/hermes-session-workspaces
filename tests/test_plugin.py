@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import sqlite3
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import test_manager as fixtures
@@ -177,6 +179,72 @@ class PluginTests(fixtures.ManagerTests):
         self.assertNotEqual(one['workspace']['path'], two['workspace']['path'])
         ambiguous = json.loads(tool({'repo': str(self.repo)}, task_id='default'))
         self.assertFalse(ambiguous['success'])
+
+    def test_failed_resume_blocks_task_aliases_until_successful_retry(self):
+        ctx = self.plugin()
+        hook = ctx.hooks['pre_llm_call']
+        tool = ctx.tools['workspace_repo']['handler']
+        guard = ctx.hooks['pre_tool_call']
+        entry = json.loads(tool({'repo': str(self.repo)}, task_id='task'))['workspace']
+        path = Path(entry['path']) / 'file.txt'
+        path.write_text('preserved work')
+        hook(session_id='root', task_id='older-task')
+        failure = hook(session_id='root', task_id='task', parent_session_id='missing')
+        self.assertIn('WORKSPACE ERROR', failure['context'])
+        for identity in ({'session_id': 'root'}, {'task_id': 'task'}, {'task_id': 'older-task'}):
+            with self.subTest(identity=identity):
+                result = json.loads(tool({'repo': str(self.repo)}, **identity))
+                with self.subTest(operation='tool'):
+                    self.assertFalse(result['success'], result)
+                    self.assertIn('Unknown parent', result['error'])
+                blocked = guard(tool_name='write_file', args={'path': str(path)},
+                                cwd=str(self.root), **identity)
+                with self.subTest(operation='guard'):
+                    self.assertIsNotNone(blocked)
+                    self.assertEqual(blocked['action'], 'block')
+                    self.assertIn('Unknown parent', blocked['message'])
+        self.assertEqual(path.read_text(), 'preserved work')
+        self.assertNotIn('WORKSPACE ERROR', hook(session_id='root', task_id='task')['context'])
+        self.assertTrue(json.loads(tool({'repo': str(self.repo)}, task_id='older-task'))['success'])
+        self.assertIsNone(guard(tool_name='write_file', args={'path': str(path)},
+                                task_id='older-task', cwd=str(self.root)))
+
+    def test_registry_read_failure_after_bind_blocks_new_task_alias(self):
+        ctx = self.plugin()
+        hook = ctx.hooks['pre_llm_call']
+        manager = hook.__self__.manager
+        with patch.object(manager, 'entries', side_effect=sqlite3.OperationalError('private detail')):
+            failure = hook(session_id='root', task_id='new-task')
+        self.assertIn('Workspace initialization failed', failure['context'])
+        self.assertNotIn('private detail', failure['context'])
+        tool = ctx.tools['workspace_repo']['handler']
+        result = json.loads(tool({'repo': str(self.repo)}, task_id='new-task'))
+        self.assertFalse(result['success'], result)
+        self.assertEqual(result['error'], 'Workspace initialization failed')
+        self.assertEqual(manager.entries('root'), [])
+        self.assertNotIn('WORKSPACE ERROR', hook(session_id='root', task_id='new-task')['context'])
+        self.assertTrue(json.loads(tool({'repo': str(self.repo)}, task_id='new-task'))['success'])
+
+    def test_failed_child_does_not_block_parent_or_sibling_in_same_root(self):
+        ctx = self.plugin()
+        hook = ctx.hooks['pre_llm_call']
+        tool = ctx.tools['workspace_repo']['handler']
+        hook(session_id='child', task_id='child-task', parent_session_id='root')
+        hook(session_id='sibling', task_id='sibling-task', parent_session_id='root')
+        hook(session_id='child', task_id='child-task', parent_session_id='missing')
+        self.assertFalse(json.loads(tool({'repo': str(self.repo)}, task_id='child-task'))['success'])
+        for task in ('task', 'sibling-task'):
+            result = json.loads(tool({'repo': str(self.repo)}, task_id=task))
+            self.assertTrue(result['success'], result)
+
+    def test_rejected_task_claim_does_not_poison_existing_owner(self):
+        ctx = self.plugin()
+        failure = ctx.hooks['pre_llm_call'](session_id='intruder', task_id='task')
+        self.assertIn('WORKSPACE ERROR', failure['context'])
+        tool = ctx.tools['workspace_repo']['handler']
+        self.assertFalse(json.loads(tool({'repo': str(self.repo)}, session_id='intruder'))['success'])
+        result = json.loads(tool({'repo': str(self.repo)}, task_id='task'))
+        self.assertTrue(result['success'], result)
 
     def test_remote_backend_is_explicitly_rejected(self):
         ctx = self.plugin()

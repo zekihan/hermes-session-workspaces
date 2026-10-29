@@ -72,11 +72,19 @@ class Plugin:
             self.errors[identity] = str(exc) if isinstance(exc, WorkspaceError) else 'Workspace initialization failed'
             return {'context': 'WORKSPACE ERROR: ' + self.errors[identity] + '. Do not access repositories.'}
 
+    def check_initialization(self, identity):
+        # Failed binds may have no persisted session. Check that error first,
+        # then resolve task aliases through their actual, immutable owner.
+        if identity in self.errors:
+            raise WorkspaceError(self.errors[identity])
+        session, _ = self.manager.resolve_session(identity)
+        if session in self.errors:
+            raise WorkspaceError(self.errors[session])
+
     def tool(self, args, task_id=None, session_id=None, **kwargs):
         identity = session_id or task_id
         try:
-            if identity in self.errors:
-                raise WorkspaceError(self.errors[identity])
+            self.check_initialization(identity)
             runtime(task_id or session_id, kwargs)
             entry = self.manager.ensure(identity, args['repo'], create=args.get('create', False))
             return json.dumps({'success': True, 'workspace': entry})
@@ -89,9 +97,7 @@ class Plugin:
             return None
         identity = session_id or task_id
         try:
-            if identity in self.errors:
-                raise WorkspaceError(self.errors[identity])
-            self.manager.root_session(identity)
+            self.check_initialization(identity)
             cwd = runtime(task_id or session_id, kwargs)
             if tool_name == 'workspace_repo':
                 return None  # The manager validates the original repo and performs the fetch.

@@ -117,16 +117,20 @@ class Manager:
                     conn.execute('INSERT INTO tasks (task, session) VALUES (?, ?)', (task_id, session_id))
         return self.workspace_id(session_id)
 
-    def root_session(self, identity):
+    def resolve_session(self, identity):
+        """Return the owning session and root, accepting registered task aliases."""
         with self.connect() as conn:
-            row = conn.execute('SELECT root FROM sessions WHERE session=?', (identity,)).fetchone()
+            row = conn.execute('SELECT session, root FROM sessions WHERE session=?', (identity,)).fetchone()
             if not row:
                 task = conn.execute('SELECT session FROM tasks WHERE task=?', (identity,)).fetchone()
-                row = conn.execute('SELECT root FROM sessions WHERE session=?',
+                row = conn.execute('SELECT session, root FROM sessions WHERE session=?',
                                    (task[0],)).fetchone() if task else None
         if not row:
             raise WorkspaceError('Session not initialized; run a chat turn before workspace_repo')
-        return row[0]
+        return row
+
+    def root_session(self, identity):
+        return self.resolve_session(identity)[1]
 
     def workspace_id(self, identity):
         return 's-' + hashlib.sha256(self.root_session(identity).encode()).hexdigest()[:20]
