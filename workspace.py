@@ -38,6 +38,9 @@ class Manager:
             ''')
             # Serialize migrations too: multiple sessions may load an older DB.
             conn.execute('BEGIN IMMEDIATE')
+            session_columns = {row[1] for row in conn.execute('PRAGMA table_info(sessions)')}
+            if 'parent' not in session_columns:
+                conn.execute('ALTER TABLE sessions ADD COLUMN parent TEXT')
             columns = {row[1] for row in conn.execute('PRAGMA table_info(workspaces)')}
             if 'bootstrap' not in columns:
                 conn.execute('ALTER TABLE workspaces ADD COLUMN bootstrap INTEGER NOT NULL DEFAULT 0')
@@ -78,15 +81,40 @@ class Manager:
     def bind(self, session_id, task_id=None, parent_session_id=None):
         if not isinstance(session_id, str) or not session_id or session_id == 'default':
             raise WorkspaceError('A real session ID is required')
+        # Lock before reading: checks and both mappings form one transaction,
+        # including when separate Manager instances/processes bind concurrently.
         with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            existing = conn.execute('SELECT root, parent FROM sessions WHERE session=?',
+                                    (session_id,)).fetchone()
             parent = conn.execute('SELECT root FROM sessions WHERE session=?',
                                   (parent_session_id,)).fetchone() if parent_session_id else None
             if parent_session_id and not parent:
                 raise WorkspaceError('Unknown parent session; refusing a separate child workspace')
-            root = parent[0] if parent else session_id
-            conn.execute('INSERT OR IGNORE INTO sessions VALUES (?, ?)', (session_id, root))
+            if parent_session_id:
+                if parent_session_id == session_id:
+                    raise WorkspaceError('A session cannot be its own parent')
+                root = parent[0]
+                if existing and (existing[0] != root or existing[0] == session_id
+                                 or existing[1] not in (None, parent_session_id)):
+                    raise WorkspaceError('Session is already bound to a different parent')
+            else:
+                # Hermes may omit ancestry when resuming an existing child.
+                root = existing[0] if existing else session_id
+            if not existing:
+                conn.execute('INSERT INTO sessions (session, root, parent) VALUES (?, ?, ?)',
+                             (session_id, root, parent_session_id or None))
+            elif parent_session_id and existing[1] is None:
+                # Older databases only recorded the root. Accept an explicit
+                # parent in that root once, then preserve that exact parent.
+                conn.execute('UPDATE sessions SET parent=? WHERE session=?',
+                             (parent_session_id, session_id))
             if task_id and task_id != 'default':
-                conn.execute('INSERT OR REPLACE INTO tasks VALUES (?, ?)', (task_id, session_id))
+                owner = conn.execute('SELECT session FROM tasks WHERE task=?', (task_id,)).fetchone()
+                if owner and owner[0] != session_id:
+                    raise WorkspaceError('Task is already bound to a different session')
+                if not owner:
+                    conn.execute('INSERT INTO tasks (task, session) VALUES (?, ?)', (task_id, session_id))
         return self.workspace_id(session_id)
 
     def root_session(self, identity):
