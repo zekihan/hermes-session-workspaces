@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 
 from .workspace import Manager, WorkspaceError
@@ -101,7 +102,18 @@ class Plugin:
                     workdir = cwd / workdir
                 paths.append(workdir)
                 # Conservative literal-path checks, NOT a shell interpreter/sandbox.
-                paths.extend(re.findall(r'(?:~?/)[^\s\"\'`;|&()<>]+', args.get('command', '')))
+                # Decode shell quoting before extracting paths, so spaces and
+                # escaped characters remain part of the same literal pathname.
+                command = args.get('command', '')
+                if not isinstance(command, str):
+                    raise WorkspaceError('Terminal command must be a string')
+                lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()<>')
+                lexer.whitespace_split = True
+                lexer.commenters = ''
+                for token in lexer:
+                    match = re.search(r'(?:~?/).*', token, re.DOTALL)
+                    if match:
+                        paths.append(match.group())
             else:
                 for key in ('path', 'filepath', 'file_path'):
                     if args.get(key):

@@ -99,7 +99,7 @@ Commit and publish explicitly when authorized. Keep the registered session branc
 This is an accidental-edit guardrail, **not a filesystem sandbox**:
 
 - File-tool paths (including relative paths, symlink resolution and V4A patch paths) are checked.
-- Terminal cwd and literal absolute paths in commands are conservatively checked. Dynamically computed paths, scripts, environment expansion and commands executing elsewhere can bypass those checks. False-positive blocking is possible.
+- Terminal cwd and literal absolute paths in commands are conservatively checked, including shell-quoted or escaped paths containing spaces. Dynamically computed paths, scripts, environment expansion and commands executing elsewhere can bypass those checks. False-positive blocking is possible.
 - Tools other than `read_file`, `write_file`, `patch`, `search_files`, `terminal` and `workspace_repo` are not intercepted. For example, external MCP tools, browser/computer access and direct Python filesystem writes are outside this guard.
 - Shared Git metadata and local refs are not isolated by normal Git worktrees. Branch protection should be configured separately for remote `main`; this plugin does not police every possible Git command.
 - Repository hooks, fsmonitor and checkout filters are disabled for manager Git calls. Git LFS/custom smudge filters are not materialized automatically. Normal agent-run Git commands retain their usual behaviour.
